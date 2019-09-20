@@ -9,7 +9,6 @@ import os
 import math
 import argparse
 from scipy import stats
-import task_generator_test as tg
 
 
 parser = argparse.ArgumentParser(description="One Shot Visual Recognition")
@@ -122,8 +121,8 @@ def main():
     print("load data folders")
 
     trainFolders, testFolders = mt.taskFolders(
-        trainRoot="../datas/miniImagenet/train",
-        testRoot="../datas/miniImagenet/test"
+        trainRoot="/home/zwq/Projects/LearningToCompare_FSL/datas/miniImagenet/train",
+        testRoot="/home/zwq/Projects/LearningToCompare_FSL/datas/miniImagenet/test"
     )
 
     print("init neural networks")
