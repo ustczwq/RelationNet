@@ -37,11 +37,21 @@ LEARNING_RATE = args.learning_rate
 HIDDEN_UNIT = args.hidden_unit
 
 
-def imgShow(tensorImg):
-    npImg = tensorImg.cpu().numpy()
-    plt.axis("off")
-    plt.imshow(np.transpose(npImg, (1, 2, 0)))
-    plt.show()
+def getImgsOrderByLabels(rows, labels):
+    order = [[] for i in range(rows)]
+    columns = [0 for i in range(rows)]
+    maxCol = 0
+
+    for i, l in enumerate(labels):
+        order[l].append(i)
+        columns[l] += 1
+        if columns[l] > maxCol:
+            maxCol = columns[l]
+
+    print(order)
+    print(labels)
+
+    return order, maxCol
 
 
 def imgRestore(img, mean, std):
@@ -55,21 +65,31 @@ def imgRestore(img, mean, std):
     return np.clip(arr, 0, 1)
 
 
-def plotTestImgs(tensorImgs):
-    num = tensorImgs.shape[0]
-    imgs = tensorImgs.cpu().numpy()
-    fig, axs = plt.subplots(1, num)
-    for i, ax in enumerate(axs):
-        img = np.transpose(imgs[i], (1, 2, 0))
-        img = imgRestore(
-            img,
-            mean=[0.92206, 0.92206, 0.92206],
-            std=[0.08426, 0.08426, 0.08426]
-        )
+def plotAxImg(img, ax):
+    img = imgRestore(
+        img,
+        mean=[0.92206, 0.92206, 0.92206],
+        std=[0.08426, 0.08426, 0.08426]
+    )
+    ax.imshow(img)
+
+
+def plotOneShotImgs(sampleTensorImgs, testTensorImgs, ways, labels):
+    order, cols = getImgsOrderByLabels(ways, labels)
+    sampleImgs = np.transpose(sampleTensorImgs.cpu().numpy(), (0, 2, 3, 1))
+    testImgs = np.transpose(testTensorImgs.cpu().numpy(), (0, 2, 3, 1))
+
+    fig, axs = plt.subplots(ways, cols + 1)
+    for row, ax in enumerate(axs):
+        plotAxImg(sampleImgs[row], ax[0])
+        for col, num in enumerate(order[row]):
+            plotAxImg(testImgs[num], ax[col + 1])
+
+    for ax in axs.flat:
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set(aspect=1, adjustable='box')
-        ax.imshow(img)
+
     fig.tight_layout()
     fig.subplots_adjust(wspace=0, hspace=0)
     plt.show()
@@ -240,7 +260,13 @@ def main():
                     testLabels).sum().cpu().numpy()
                 counter += batchSize
 
-                plotTestImgs(sampleImgs)
+                # plotTestImgs(sampleImgs)
+                plotOneShotImgs(
+                    sampleImgs,
+                    testImgs,
+                    ways=CLASS_NUM,
+                    labels=predictLabels.cpu().numpy()
+                )
 
             acc = totalRewards/1.0/counter
             accs.append(acc)
