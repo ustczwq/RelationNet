@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import transforms
 from torch.autograd import Variable
 from torch.optim.lr_scheduler import StepLR
@@ -10,6 +11,8 @@ import math
 import argparse
 from scipy import stats
 import matplotlib.pyplot as plt
+from PIL import Image
+import cv2
 
 
 parser = argparse.ArgumentParser(description="One Shot Visual Recognition")
@@ -65,25 +68,42 @@ def imgRestore(img, mean, std):
     return np.clip(arr, 0, 1)
 
 
-def plotAxImg(img, ax):
-    img = imgRestore(
-        img,
-        mean=[0.92206, 0.92206, 0.92206],
-        std=[0.08426, 0.08426, 0.08426]
-    )
-    ax.imshow(img)
+def tensor2Imgs(tensor):
+    imgs = tensor.cpu().numpy()
+    imgs = np.transpose(imgs, (0, 2, 3, 1))
+    for i, img in enumerate(imgs):
+        imgs[i] = imgRestore(
+            img,
+            mean=[0.92206, 0.92206, 0.92206],
+            std=[0.08426, 0.08426, 0.08426]
+        )
+    return np.uint8(255 * imgs)
 
 
-def plotOneShotImgs(sampleTensorImgs, testTensorImgs, ways, labels):
-    order, cols = getImgsOrderByLabels(ways, labels)
-    sampleImgs = np.transpose(sampleTensorImgs.cpu().numpy(), (0, 2, 3, 1))
-    testImgs = np.transpose(testTensorImgs.cpu().numpy(), (0, 2, 3, 1))
+def getCamOnImgs(cams, imgs, alpha=0.5):
+    maps = []
+    cmap = plt.get_cmap('jet')
+    for i, img in enumerate(imgs):
+        cam = cv2.resize(
+            cams[i],
+            (img.shape[0], img.shape[1]),
+            interpolation=cv2.INTER_CUBIC
+        )
+        cam = np.uint8(255 * cmap(cam))
+        cam = Image.fromarray(cam).convert('RGBA')
+        img = Image.fromarray(img).convert('RGBA')
+        maps.append(Image.blend(img, cam, alpha))
+    return maps
 
-    fig, axs = plt.subplots(ways, cols + 1)
+
+def plotOneShotImgs(sampleImgs, testImgs, rows, labels):
+    order, cols = getImgsOrderByLabels(rows, labels)
+
+    fig, axs = plt.subplots(rows, cols + 1)
     for row, ax in enumerate(axs):
-        plotAxImg(sampleImgs[row], ax[0])
+        ax[0].imshow(sampleImgs[row])
         for col, num in enumerate(order[row]):
-            plotAxImg(testImgs[num], ax[col + 1])
+            ax[col + 1].imshow(testImgs[num])
 
     for ax in axs.flat:
         ax.set_xticks([])
@@ -92,6 +112,8 @@ def plotOneShotImgs(sampleTensorImgs, testTensorImgs, ways, labels):
 
     fig.tight_layout()
     fig.subplots_adjust(wspace=0, hspace=0)
+    mng = plt.get_current_fig_manager()
+    mng.resize(*mng.window.maxsize())
     plt.show()
 
 
@@ -101,6 +123,52 @@ def meanConfidenceInterval(data, confidence=0.95):
     mean, sem = np.mean(arr), stats.sem(arr)
     h = sem * stats.t._ppf((1 + confidence)/2., n - 1)
     return mean, h
+
+
+class GradCAM(object):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    def __init__(self, model):
+        self.model = model.to(self.device)
+
+    def hookLayer(self, layerName, hookNum):
+        self.conv = [[] for i in range(hookNum)]
+        self.grad = [[] for i in range(hookNum)]
+        self.forwardIdx = 0
+        self.backwardIdx = 0
+
+        def forwardHook(module, gradIn, gradOut):
+            self.conv[self.forwardIdx] = gradOut.detach().cpu().numpy()
+            self.forwardIdx += 1
+            self.forwardIdx %= hookNum
+            # print(gradIn[0].size(), gradOut.size(), 'hook forward++++')
+
+        def backwardHook(module, gradIn, gradOut):
+            self.grad[hookNum - 1 -
+                      self.backwardIdx] = gradOut[0].detach().cpu().numpy()
+            self.backwardIdx += 1
+            self.backwardIdx %= hookNum
+            # print(gradIn[0].size(), gradOut[0].size(), 'hook backward----')
+
+        self.model._modules[layerName].register_forward_hook(forwardHook)
+        self.model._modules[layerName].register_backward_hook(backwardHook)
+
+    def showGrad(self):
+        for item in self.conv:
+            print('  hooked conv:', np.shape(item))
+        for item in self.grad:
+            print('  hooked grad:', np.shape(item))
+
+    def getCAM(self):
+        weights = np.maximum(self.grad[1], 0)
+        convOuts = np.maximum(self.conv[1], 0)
+
+        maps = weights * convOuts
+        maps = maps.mean(axis=1)
+        maps = (maps - np.min(maps)) / (np.max(maps) - np.min(maps))
+        maps = np.uint8(maps * 255)
+
+        return maps
 
 
 class Encoder(nn.Module):
@@ -167,8 +235,12 @@ class RelationNet(nn.Module):
         return out
 
 
+def hookFunc(module, gradIn, gradOut):
+    print(gradIn[0].size(), gradOut[0].size(), "hooked!!!!!!!")
+
+
 def main():
-    device = "cuda:0"
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(
@@ -188,6 +260,9 @@ def main():
 
     featureEncoder = Encoder()
     relationNet = RelationNet(FEATURE_DIM, RELATION_DIM)
+
+    gradCAM = GradCAM(featureEncoder)
+    gradCAM.hookLayer('layer1', 2)
 
     featureEncoder.to(device)
     relationNet.to(device)
@@ -260,12 +335,23 @@ def main():
                     testLabels).sum().cpu().numpy()
                 counter += batchSize
 
-                # plotTestImgs(sampleImgs)
+                oneHot = torch.zeros(relations.size(), device=device)
+                for i in range(relations.size(0)):
+                    l = testLabels.cpu().numpy()[i]
+                    oneHot[i][l] = 1
+                relations.backward(gradient=oneHot)
+
+                # gradCAM.showGrad()
+                sImgs = tensor2Imgs(sampleImgs)
+                tImgs = tensor2Imgs(testImgs)
+                cams = gradCAM.getCAM()
+                maps = getCamOnImgs(cams, tImgs, 0.2)
+
                 plotOneShotImgs(
-                    sampleImgs,
-                    testImgs,
-                    ways=CLASS_NUM,
-                    labels=predictLabels.cpu().numpy()
+                    sImgs,
+                    maps,
+                    rows=CLASS_NUM,
+                    labels=testLabels.cpu().numpy()
                 )
 
             acc = totalRewards/1.0/counter
